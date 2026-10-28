@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Frame Uploader reads the albums you choose so it can resize those photos and send them to your Frame TV.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Frame Uploader connects to your Samsung Frame TV on your home network to upload photos.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- The TV only speaks plain HTTP or TLS with a self-signed certificate on the local network. -->
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+</dict>
+</plist>
