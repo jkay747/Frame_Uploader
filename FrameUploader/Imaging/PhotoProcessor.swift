@@ -66,32 +66,45 @@ final class PhotoProcessor: @unchecked Sendable {
     static let detectionPixelSize = 1024
 
     /// A 3840×2160 JPEG, sized for a 4K TV, ready to upload.
-    func makeTVImage(from data: Data) throws -> (jpeg: Data, mode: FitMode) {
+    func makeTVImage(from data: Data, adjustment: PhotoAdjustment = PhotoAdjustment()) throws -> (jpeg: Data, mode: FitMode) {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
             throw PhotoProcessingError.unreadableImage
         }
         // Decode straight to the resolution the 4K output needs. A 48 MP photo decoded at full size is
         // ~200 MB of pixels and was the slowest step; downsampling while decoding is many times faster.
-        let decodeSize = ImageLoader.pixelSizeNeeded(for: source, output: Self.tvSize)
+        let decodeSize = ImageLoader.pixelSizeNeeded(for: source, output: Self.tvSize, adjustment: adjustment)
         let image = try ImageLoader.image(from: source, maxPixelSize: decodeSize)
         var detection = image
         if max(image.width, image.height) > Self.detectionPixelSize {
             detection = try ImageLoader.image(from: source, maxPixelSize: Self.detectionPixelSize)
         }
-        let (rendered, mode) = try render(image, detectionImage: detection, outputSize: Self.tvSize)
+        let (rendered, mode) = try render(image, detectionImage: detection, outputSize: Self.tvSize, adjustment: adjustment)
         return (try budgetedJPEG(rendered), mode)
     }
 
     /// Small version of exactly what the TV will show.
-    func makePreview(from image: CGImage) throws -> (image: CGImage, mode: FitMode) {
-        try render(image, detectionImage: image, outputSize: Self.previewSize)
+    func makePreview(from image: CGImage, adjustment: PhotoAdjustment = PhotoAdjustment(), size: CGSize = PhotoProcessor.previewSize) throws -> (image: CGImage, mode: FitMode) {
+        try render(image, detectionImage: image, outputSize: size, adjustment: adjustment)
+    }
+
+    /// The crop the app would pick by itself, normalized with a top-left origin. The crop editor starts here.
+    func automaticCrop(for image: CGImage) -> CGRect {
+        let size = CGSize(width: image.width, height: image.height)
+        let focus = SubjectDetector.focusRegion(in: image)
+        let crop = CropPlanner.cropRect(
+            imageSize: size,
+            aspect: Self.tvSize.width / Self.tvSize.height,
+            focus: focus?.rect,
+            focusIsFaces: focus?.isFaces ?? false
+        )
+        return CropPlanner.normalized(crop, imageSize: size)
     }
 
     // MARK: - Rendering
 
     /// `detectionImage` is a (usually smaller) copy of `image` used to find faces and subjects.
-    func render(_ image: CGImage, detectionImage: CGImage, outputSize: CGSize) throws -> (CGImage, FitMode) {
-        let isLandscape = image.width > image.height
+    func render(_ image: CGImage, detectionImage: CGImage, outputSize: CGSize, adjustment: PhotoAdjustment) throws -> (CGImage, FitMode) {
+        let mode = adjustment.resolvedMode(for: CGSize(width: image.width, height: image.height))
         guard let context = CGContext(
             data: nil,
             width: Int(outputSize.width),
@@ -106,25 +119,33 @@ final class PhotoProcessor: @unchecked Sendable {
         context.interpolationQuality = .high
         let canvas = CGRect(origin: .zero, size: outputSize)
 
-        if isLandscape {
-            try drawSmartCrop(image, detectionImage: detectionImage, in: context, canvas: canvas)
-        } else {
+        switch mode {
+        case .smartCrop:
+            try drawSmartCrop(image, detectionImage: detectionImage, manualCrop: adjustment.crop, in: context, canvas: canvas)
+        case .blurredBackground:
             try drawBlurredFill(image, in: context, canvas: canvas)
         }
 
         guard let result = context.makeImage() else { throw PhotoProcessingError.renderFailed }
-        return (result, isLandscape ? .smartCrop : .blurredBackground)
+        return (result, mode)
     }
 
-    private func drawSmartCrop(_ image: CGImage, detectionImage: CGImage, in context: CGContext, canvas: CGRect) throws {
-        // Focus is normalized, so it carries over from the detection copy to the full image.
-        let focus = SubjectDetector.focusRegion(in: detectionImage)
-        let crop = CropPlanner.cropRect(
-            imageSize: CGSize(width: image.width, height: image.height),
-            aspect: canvas.width / canvas.height,
-            focus: focus?.rect,
-            focusIsFaces: focus?.isFaces ?? false
-        )
+    private func drawSmartCrop(_ image: CGImage, detectionImage: CGImage, manualCrop: CGRect?, in context: CGContext, canvas: CGRect) throws {
+        let imageSize = CGSize(width: image.width, height: image.height)
+        let aspect = canvas.width / canvas.height
+        let crop: CGRect
+        if let manualCrop {
+            crop = CropPlanner.pixelRect(normalized: manualCrop, imageSize: imageSize, aspect: aspect)
+        } else {
+            // Focus is normalized, so it carries over from the detection copy to the full image.
+            let focus = SubjectDetector.focusRegion(in: detectionImage)
+            crop = CropPlanner.cropRect(
+                imageSize: imageSize,
+                aspect: aspect,
+                focus: focus?.rect,
+                focusIsFaces: focus?.isFaces ?? false
+            )
+        }
         guard let cropped = image.cropping(to: crop) else { throw PhotoProcessingError.renderFailed }
         context.draw(cropped, in: canvas)
     }
@@ -225,7 +246,7 @@ enum ImageLoader {
     }
 
     /// The longest side to decode so the photo still fills `output` at full sharpness, never above the original.
-    static func pixelSizeNeeded(for source: CGImageSource, output: CGSize) -> Int? {
+    static func pixelSizeNeeded(for source: CGImageSource, output: CGSize, adjustment: PhotoAdjustment) -> Int? {
         guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let pixelWidth = properties[kCGImagePropertyPixelWidth] as? Int,
               let pixelHeight = properties[kCGImagePropertyPixelHeight] as? Int,
@@ -239,10 +260,20 @@ enum ImageLoader {
         if let orientation = properties[kCGImagePropertyOrientation] as? Int, (5...8).contains(orientation) {
             swap(&width, &height)
         }
-        // Landscape photos are cropped to fill the screen; portrait and square ones are fitted inside it.
-        let scale = width > height
-            ? max(output.width / width, output.height / height)
-            : min(output.width / width, output.height / height)
+        // Cropped photos fill the screen; blurred-fill ones are fitted inside it. A zoomed-in manual crop
+        // covers less of the photo, so it needs proportionally more pixels to stay sharp.
+        let scale: CGFloat
+        switch adjustment.resolvedMode(for: CGSize(width: width, height: height)) {
+        case .smartCrop:
+            let fill = max(output.width / width, output.height / height)
+            if let crop = adjustment.crop, crop.width > 0 {
+                scale = max(fill, output.width / (crop.width * width))
+            } else {
+                scale = fill
+            }
+        case .blurredBackground:
+            scale = min(output.width / width, output.height / height)
+        }
         return Int((max(width, height) * min(scale, 1)).rounded(.up))
     }
 

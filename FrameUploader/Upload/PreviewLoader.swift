@@ -21,7 +21,7 @@ final class PreviewLoader: @unchecked Sendable {
     }
 
     func preview(for item: PhotoItem) async -> PhotoPreview? {
-        let key = item.id.uuidString as NSString
+        let key = "\(item.id.uuidString)|\(item.adjustment.key)" as NSString
         if let cached = cache.object(forKey: key) { return cached }
 
         await limiter.acquire()
@@ -30,8 +30,9 @@ final class PreviewLoader: @unchecked Sendable {
 
         do {
             let source = try await PhotoLoader.previewImage(for: item.origin, maxPixelSize: 1024)
+            let adjustment = item.adjustment
             let (rendered, mode) = try await Task.detached(priority: .utility) {
-                try PhotoProcessor.shared.makePreview(from: source)
+                try PhotoProcessor.shared.makePreview(from: source, adjustment: adjustment)
             }.value
             let preview = PhotoPreview(
                 image: NSImage(cgImage: rendered, size: NSSize(width: rendered.width, height: rendered.height)),

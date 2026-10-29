@@ -2,8 +2,11 @@ import Foundation
 
 struct UploadRecord: Codable, Hashable {
     var contentID: String
-    /// SHA-256 of the original photo file, used to spot duplicates.
+    /// SHA-256 of the original photo file plus any crop/fit adjustment, used to spot duplicates.
     var fingerprint: String
+    /// SHA-256 of the original file alone, so an earlier crop of the same photo can be replaced.
+    /// Missing in records saved before adjustments existed, where `fingerprint` is the same thing.
+    var sourceFingerprint: String?
     var matteID: String
     var sourceName: String
     var uploadedAt: Date
@@ -38,6 +41,13 @@ final class UploadRegistry: ObservableObject {
 
     func record(for host: String, fingerprint: String) -> UploadRecord? {
         recordsByHost[host]?.values.first { $0.fingerprint == fingerprint }
+    }
+
+    /// Other uploads of the same original photo (e.g. with a different crop).
+    func otherVersions(for host: String, sourceFingerprint: String, excluding fingerprint: String) -> [UploadRecord] {
+        (recordsByHost[host] ?? [:]).values.filter {
+            ($0.sourceFingerprint ?? $0.fingerprint) == sourceFingerprint && $0.fingerprint != fingerprint
+        }
     }
 
     func add(_ record: UploadRecord, for host: String) {

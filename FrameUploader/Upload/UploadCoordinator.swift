@@ -129,6 +129,16 @@ final class UploadCoordinator: ObservableObject {
         }
     }
 
+    /// Changes how one photo fills the screen; its preview refreshes on its own.
+    func setAdjustment(_ adjustment: PhotoAdjustment, for id: PhotoItem.ID) {
+        guard !isWorking, let index = items.firstIndex(where: { $0.id == id }) else { return }
+        items[index].adjustment = adjustment
+        // A new crop is a new version for the TV, so clear any earlier result for this photo.
+        if items[index].status != .pending {
+            items[index].status = .pending
+        }
+    }
+
     func toggleIncluded(_ id: PhotoItem.ID) {
         guard !isWorking, let index = items.firstIndex(where: { $0.id == id }) else { return }
         items[index].isIncluded.toggle()
@@ -179,29 +189,32 @@ final class UploadCoordinator: ObservableObject {
     /// A photo made ready for the TV, or found to be on it already.
     private enum PreparedPhoto {
         case alreadyOnTV(UploadRecord)
-        case ready(fingerprint: String, jpeg: Data)
+        case ready(fingerprint: String, sourceFingerprint: String, jpeg: Data)
     }
 
     private func prepare(_ item: PhotoItem, host: String, skipDuplicates: Bool, onTV: Set<String>) async throws -> PreparedPhoto {
         let clock = ContinuousClock()
         let started = clock.now
         let data = try await PhotoLoader.data(for: item.origin)
-        let fingerprint = await Task.detached(priority: .userInitiated) {
+        let sourceFingerprint = await Task.detached(priority: .userInitiated) {
             PhotoLoader.fingerprint(of: data)
         }.value
+        let adjustment = item.adjustment
+        // A re-cropped photo is a different picture on the TV, so it gets its own fingerprint.
+        let fingerprint = adjustment.isDefault ? sourceFingerprint : "\(sourceFingerprint)|\(adjustment.key)"
 
         if skipDuplicates, let existing = registry.record(for: host, fingerprint: fingerprint), onTV.contains(existing.contentID) {
             return .alreadyOnTV(existing)
         }
 
         let jpeg = try await Task.detached(priority: .userInitiated) {
-            try PhotoProcessor.shared.makeTVImage(from: data).jpeg
+            try PhotoProcessor.shared.makeTVImage(from: data, adjustment: adjustment).jpeg
         }.value
         let original = data.count / 1024
         let optimized = jpeg.count / 1024
         let elapsed = clock.now - started
         log.info("Prepared \(item.name, privacy: .public): \(original) KB → \(optimized) KB in \(elapsed.description, privacy: .public)")
-        return .ready(fingerprint: fingerprint, jpeg: jpeg)
+        return .ready(fingerprint: fingerprint, sourceFingerprint: sourceFingerprint, jpeg: jpeg)
     }
 
     /// Connects to the saved address. If the TV doesn't answer there (routers often hand out a new
@@ -251,6 +264,7 @@ final class UploadCoordinator: ObservableObject {
 
             // Everything in this batch, whether uploaded now or already there.
             var batchIDs: [String] = []
+            var supersededIDs: [String] = []
             var matteID = options.matteID
             var reconnectsLeft = 5
 
@@ -330,7 +344,7 @@ final class UploadCoordinator: ObservableObject {
                     }
 
                     // The same photo twice in one batch is only recognizable once the first has uploaded.
-                    if case .ready(let fingerprint, _) = prepared, options.skipDuplicates,
+                    if case .ready(let fingerprint, _, _) = prepared, options.skipDuplicates,
                        let existing = registry.record(for: host, fingerprint: fingerprint),
                        onTV.contains(existing.contentID) {
                         prepared = .alreadyOnTV(existing)
@@ -347,14 +361,19 @@ final class UploadCoordinator: ObservableObject {
                         summary.alreadyOnTV += 1
                         setStatus(item.id, .alreadyOnTV)
 
-                    case .ready(let fingerprint, let jpeg):
+                    case .ready(let fingerprint, let sourceFingerprint, let jpeg):
                         setStatus(item.id, .uploading)
                         let contentID = try await send(jpeg)
                         bytesSent += jpeg.count
 
+                        // An earlier version of this photo (e.g. the old crop) is replaced by this one.
+                        supersededIDs += registry
+                            .otherVersions(for: host, sourceFingerprint: sourceFingerprint, excluding: fingerprint)
+                            .map(\.contentID)
                         registry.add(UploadRecord(
                             contentID: contentID,
                             fingerprint: fingerprint,
+                            sourceFingerprint: sourceFingerprint,
                             matteID: matteID,
                             sourceName: item.name,
                             uploadedAt: Date()
@@ -376,6 +395,14 @@ final class UploadCoordinator: ObservableObject {
                 }
             }
             progress = 1
+
+            let replacedVersions = supersededIDs.filter { onTV.contains($0) && !batchIDs.contains($0) }
+            if !replacedVersions.isEmpty, !options.replacePrevious {
+                statusText = "Replacing earlier versions of re-cropped photos…"
+                try await withReconnect { try await $0.delete(contentIDs: replacedVersions) }
+                registry.remove(contentIDs: replacedVersions, for: host)
+                summary.notes.append("Replaced \(replacedVersions.count) earlier version\(replacedVersions.count == 1 ? "" : "s") of photos you re-cropped.")
+            }
 
             if options.replacePrevious, !batchIDs.isEmpty {
                 let keep = Set(batchIDs)

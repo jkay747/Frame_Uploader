@@ -32,6 +32,8 @@ struct PhotoItem: Identifiable, Sendable {
     let group: String
     var isIncluded = true
     var status: UploadStatus = .pending
+    /// How the photo fills the screen, if the user changed it.
+    var adjustment = PhotoAdjustment()
 }
 
 enum PhotoLoader {

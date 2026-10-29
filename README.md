@@ -5,7 +5,12 @@ A Mac app that sends folders of photos, or Apple Photos albums, to a Samsung Fra
 - **Landscape photos** are cropped to fill the screen. The crop centers on faces when there are any, otherwise on the main subject (found with Apple's Vision framework).
 - **Portrait and square photos** are shown whole on a soft, blurred copy of themselves, so nothing gets cut off.
 
-The window shows a preview of exactly what the TV will display before you upload.
+The window shows a preview of exactly what the TV will display before you upload. You can change any photo:
+
+- **Fit pull-down:** the menu under each photo switches it between **Automatic**, **Smart crop** and **Blurred fill**. Smart crop works on portrait photos too.
+- **Adjust Crop…:** opens an editor with a TV-shaped frame over the photo. Drag the photo to choose what's in frame, and zoom with the slider, the − / + buttons, or a trackpad pinch. **Reset to Automatic** goes back to the app's own choice. The editor is also in the photo's right-click menu.
+
+If you change a photo that's already on the TV, the next upload sends the new version and removes the old one.
 
 ## Features
 
@@ -49,7 +54,7 @@ If the TV later gets a new IP address from your router, the app finds it again o
 ## Using it
 
 1. Drop folders onto the window, or click **Add Folder** / **Add Photos Album** in the toolbar.
-2. Check the previews. Click a photo to leave it out, or right-click for more options.
+2. Check the previews. Click a photo to leave it out, use the pull-down under it to change how it fits, or right-click for more options.
 3. Click **Upload**. Each photo shows a check mark when it's done. A summary appears at the end.
 
 The mat style, mat color and slideshow options are under **Settings › Art Mode**. The upload history is under **Settings › Uploads**.

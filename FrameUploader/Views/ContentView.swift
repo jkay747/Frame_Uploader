@@ -192,14 +192,17 @@ struct ContentView: View {
 
 private struct PhotoGrid: View {
     @EnvironmentObject private var coordinator: UploadCoordinator
+    @State private var editingItem: PhotoItem?
 
     var body: some View {
         ScrollView {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 210, maximum: 300), spacing: 14)], spacing: 18) {
                 ForEach(coordinator.items) { item in
-                    PhotoCell(item: item)
+                    PhotoCell(item: item) { editingItem = item }
                         .onTapGesture { coordinator.toggleIncluded(item.id) }
                         .contextMenu {
+                            Button("Adjust Crop…") { editingItem = item }
+                                .disabled(coordinator.isWorking)
                             Button(item.isIncluded ? "Don't Upload This Photo" : "Upload This Photo") {
                                 coordinator.toggleIncluded(item.id)
                             }
@@ -217,10 +220,15 @@ private struct PhotoGrid: View {
             }
             .padding(16)
 
-            Text("Previews show exactly what the TV will display. Click a photo to leave it out.")
+            Text("Previews show exactly what the TV will display. Click a photo to leave it out, or use the menu under it to change how it fits.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 16)
+        }
+        .sheet(item: $editingItem) { item in
+            CropEditorView(item: item) { adjustment in
+                coordinator.setAdjustment(adjustment, for: item.id)
+            }
         }
     }
 }
@@ -228,6 +236,7 @@ private struct PhotoGrid: View {
 private struct PhotoCell: View {
     @EnvironmentObject private var coordinator: UploadCoordinator
     let item: PhotoItem
+    let onAdjustCrop: () -> Void
     @State private var preview: PhotoPreview?
     @State private var loadFailed = false
 
@@ -287,21 +296,57 @@ private struct PhotoCell: View {
                 }
                 Spacer(minLength: 4)
                 if let preview {
-                    Label(preview.mode.label, systemImage: preview.mode.systemImage)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .labelStyle(.titleAndIcon)
+                    fitMenu(currentMode: preview.mode)
                 }
             }
         }
         .contentShape(Rectangle())
-        .task(id: item.id) {
+        // Re-render whenever the fit or crop changes.
+        .task(id: "\(item.id)|\(item.adjustment.key)") {
             let loaded = await coordinator.previews.preview(for: item)
             if !Task.isCancelled {
                 preview = loaded
                 loadFailed = loaded == nil
             }
         }
+    }
+}
+
+extension PhotoCell {
+    /// The pull-down under each photo for switching between automatic, smart crop and blurred fill.
+    fileprivate func fitMenu(currentMode: FitMode) -> some View {
+        Menu {
+            Picker("Fit", selection: Binding(
+                get: { item.adjustment.fit },
+                set: { fit in
+                    var adjustment = item.adjustment
+                    adjustment.fit = fit
+                    // A hand-placed crop only belongs to smart crop.
+                    if fit != .smartCrop { adjustment.crop = nil }
+                    coordinator.setAdjustment(adjustment, for: item.id)
+                }
+            )) {
+                ForEach(PhotoAdjustment.Fit.allCases, id: \.self) { fit in
+                    Text(fit.label).tag(fit)
+                }
+            }
+            .pickerStyle(.inline)
+            Divider()
+            Button("Adjust Crop…", action: onAdjustCrop)
+        } label: {
+            Label(menuTitle(currentMode: currentMode), systemImage: currentMode.systemImage)
+                .labelStyle(.titleAndIcon)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .font(.caption2)
+        .disabled(coordinator.isWorking)
+        .help("Change how this photo fills the TV")
+    }
+
+    private func menuTitle(currentMode: FitMode) -> String {
+        if item.adjustment.crop != nil { return "Custom crop" }
+        return currentMode.label
     }
 }
 
