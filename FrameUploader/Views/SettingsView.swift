@@ -196,6 +196,7 @@ private struct UploadSettingsView: View {
     @AppStorage(SettingsKey.skipDuplicates) private var skipDuplicates = AppSettings.defaultSkipDuplicates
     @AppStorage(SettingsKey.replacePrevious) private var replacePrevious = AppSettings.defaultReplacePrevious
     @ObservedObject private var registry = UploadRegistry.shared
+    @ObservedObject private var adjustments = AdjustmentStore.shared
     @State private var confirmingForget = false
 
     private var host: String { AppSettings.normalizedHost(tvHost) }
@@ -219,6 +220,16 @@ private struct UploadSettingsView: View {
                 Button("Forget Upload History…") { confirmingForget = true }
                     .disabled(registry.records(for: host).isEmpty)
                 Text("Forgetting the history leaves the photos on the TV, but this app will no longer recognize or remove them.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Section("Crop choices") {
+                LabeledContent("Photos with a saved fit or crop", value: "\(adjustments.count)")
+                Button("Forget Crop Choices") { adjustments.forgetAll() }
+                    .disabled(adjustments.count == 0)
+                Text("Your fit and crop choices are remembered between sessions. Photos from Finder are matched by where the file is, so moving or renaming a file starts it fresh. Photos are matched by their Photos library entry. Forgetting doesn't change photos already in the list.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -12,6 +12,8 @@ The window shows a preview of exactly what the TV will display before you upload
 
 If you change a photo that's already on the TV, the next upload sends the new version and removes the old one.
 
+Fit and crop choices are remembered between sessions: add the same photo again and it comes back the way you left it. Finder photos are matched by file location, so a moved or renamed file starts fresh. Photos from the Photos app are matched by their library entry. **Settings › Uploads › Forget Crop Choices** clears them all.
+
 ## Features
 
 - Drag folders, or individual photos, onto the window. Subfolders are included.
@@ -99,6 +101,6 @@ Because the app is signed locally, macOS may ask for Photos or local network per
 | `FrameUploader/Upload` | Upload flow, duplicate/replace bookkeeping, preview generation. |
 | `FrameUploader/Views` | SwiftUI windows and settings. |
 
-The upload history lives in `~/Library/Application Support/FrameUploader/uploads.json`.
+The upload history lives in `~/Library/Application Support/FrameUploader/uploads.json`, and crop choices in `adjustments.json` in the same folder.
 
 The Art Mode protocol isn't documented by Samsung. This implementation follows the open-source [samsung-tv-ws-api](https://github.com/xchwarze/samsung-tv-ws-api) project.

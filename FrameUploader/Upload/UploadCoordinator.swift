@@ -70,6 +70,7 @@ final class UploadCoordinator: ObservableObject {
     let previews = PreviewLoader()
     private let log = Logger(subsystem: "com.kay2ventures.FrameUploader", category: "upload")
     private let registry = UploadRegistry.shared
+    private let adjustments = AdjustmentStore.shared
     private var knownOrigins: Set<PhotoOrigin> = []
     private var uploadTask: Task<Void, Never>?
 
@@ -119,8 +120,10 @@ final class UploadCoordinator: ObservableObject {
 
     private func append(_ newItems: [PhotoItem]) {
         var added = 0
-        for item in newItems where !knownOrigins.contains(item.origin) {
+        for var item in newItems where !knownOrigins.contains(item.origin) {
             knownOrigins.insert(item.origin)
+            // Bring back the crop chosen for this photo in an earlier session.
+            item.adjustment = adjustments.adjustment(for: item.origin)
             items.append(item)
             added += 1
         }
@@ -133,6 +136,7 @@ final class UploadCoordinator: ObservableObject {
     func setAdjustment(_ adjustment: PhotoAdjustment, for id: PhotoItem.ID) {
         guard !isWorking, let index = items.firstIndex(where: { $0.id == id }) else { return }
         items[index].adjustment = adjustment
+        adjustments.set(adjustment, for: items[index].origin)
         // A new crop is a new version for the TV, so clear any earlier result for this photo.
         if items[index].status != .pending {
             items[index].status = .pending

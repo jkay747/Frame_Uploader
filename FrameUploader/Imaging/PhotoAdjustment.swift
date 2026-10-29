@@ -1,8 +1,8 @@
 import CoreGraphics
 
 /// The user's per-photo choice of how it fills the screen.
-struct PhotoAdjustment: Equatable, Sendable {
-    enum Fit: String, CaseIterable, Sendable {
+struct PhotoAdjustment: Codable, Equatable, Sendable {
+    enum Fit: String, CaseIterable, Codable, Sendable {
         /// Landscape photos are smart-cropped, portrait and square ones get a blurred fill.
         case automatic
         case smartCrop
