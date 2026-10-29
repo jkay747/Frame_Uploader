@@ -46,10 +46,14 @@ final class PhotoProcessor: @unchecked Sendable {
 
     private let colorSpace: CGColorSpace
     private let ciContext: CIContext
+    /// Used if the GPU path fails, e.g. when macOS's Metal shader compiler service crashes
+    /// ("MTLCompiler … XPC_ERROR_CONNECTION_INVALID" in the log).
+    private let cpuContext: CIContext
 
     init() {
         colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
         ciContext = CIContext(options: [.workingColorSpace: colorSpace])
+        cpuContext = CIContext(options: [.workingColorSpace: colorSpace, .useSoftwareRenderer: true])
     }
 
     // MARK: - Entry points
@@ -173,17 +177,15 @@ final class PhotoProcessor: @unchecked Sendable {
         exposure.inputImage = tone.outputImage
         exposure.ev = -0.5
 
-        guard let output = exposure.outputImage,
-              let rendered = ciContext.createCGImage(
-                  output,
-                  from: CGRect(origin: .zero, size: size),
-                  format: .RGBA8,
-                  colorSpace: colorSpace
-              )
-        else {
-            throw PhotoProcessingError.renderFailed
+        guard let output = exposure.outputImage else { throw PhotoProcessingError.renderFailed }
+        let extent = CGRect(origin: .zero, size: size)
+        if let rendered = ciContext.createCGImage(output, from: extent, format: .RGBA8, colorSpace: colorSpace) {
+            return rendered
         }
-        return rendered
+        if let rendered = cpuContext.createCGImage(output, from: extent, format: .RGBA8, colorSpace: colorSpace) {
+            return rendered
+        }
+        throw PhotoProcessingError.renderFailed
     }
 
     /// Encodes at `jpegQuality`, stepping down only when a very detailed photo would exceed the budget.

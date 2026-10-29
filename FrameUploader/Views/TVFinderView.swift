@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Searches the network for Frame TVs and lets the user pick one, or type an IP address if none is found.
@@ -12,6 +13,7 @@ struct TVFinderView: View {
         case searching
         case found([DiscoveredTV])
         case notFound
+        case localNetworkDenied
     }
 
     var body: some View {
@@ -63,6 +65,25 @@ struct TVFinderView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Button("Search Again") { Task { await search() } }
                 manualEntry(intro: "To find your TV's IP address:")
+
+            case .localNetworkDenied:
+                Label("macOS is blocking access to your local network.", systemImage: "network.slash")
+                    .font(.headline)
+                Text("Frame Uploader needs permission to reach devices on your home network to find and talk to the TV.")
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("1. Open System Settings › Privacy & Security › Local Network.\n2. Turn on Frame Uploader.\n3. Quit and reopen Frame Uploader, then search again.")
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("If Frame Uploader isn't in that list, or it is already on, the copy you just built may not have been approved yet. See “Local network access” in the README.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("Open Local Network Settings") {
+                        NSWorkspace.shared.open(LocalNetworkAccess.settingsURL)
+                    }
+                    Button("Search Again") { Task { await search() } }
+                }
             }
         }
         .task { await search() }
@@ -95,8 +116,14 @@ struct TVFinderView: View {
 
     private func search() async {
         state = .searching
-        let tvs = await TVDiscovery.findFrameTVs()
-        state = tvs.isEmpty ? .notFound : .found(tvs)
+        let result = await TVDiscovery.findFrameTVs()
+        if !result.tvs.isEmpty {
+            state = .found(result.tvs)
+        } else if result.localNetworkDenied {
+            state = .localNetworkDenied
+        } else {
+            state = .notFound
+        }
     }
 }
 

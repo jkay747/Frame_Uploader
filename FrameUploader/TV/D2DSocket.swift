@@ -31,7 +31,12 @@ enum D2DSocket {
                 case .ready:
                     once.run { continuation.resume() }
                 case .failed(let error), .waiting(let error):
-                    once.run { continuation.resume(throwing: FrameTVError.connectionLost(error.localizedDescription)) }
+                    let denied = connection.currentPath?.unsatisfiedReason == .localNetworkDenied
+                    once.run {
+                        continuation.resume(throwing: denied
+                            ? FrameTVError.localNetworkDenied
+                            : FrameTVError.connectionLost(error.localizedDescription))
+                    }
                     connection.cancel()
                 case .cancelled:
                     once.run { continuation.resume(throwing: FrameTVError.timeout("opening the upload connection")) }

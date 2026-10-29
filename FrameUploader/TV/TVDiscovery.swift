@@ -14,41 +14,61 @@ struct DiscoveredTV: Identifiable, Hashable, Sendable {
 enum TVDiscovery {
     private static let log = Logger(subsystem: "com.kay2ventures.FrameUploader", category: "discovery")
 
+    struct Result {
+        var tvs: [DiscoveredTV] = []
+        /// macOS blocked the search; finding nothing says nothing about whether a TV is there.
+        var localNetworkDenied = false
+    }
+
     /// SSDP (UPnP) first, which Samsung TVs answer within a second or two. If nothing replies — some
     /// routers block multicast — every address on the Mac's local subnet is asked for TV info instead.
-    static func findFrameTVs() async -> [DiscoveredTV] {
+    static func findFrameTVs() async -> Result {
         let announced = await Task.detached(priority: .userInitiated) {
             ssdpSearch(timeout: 2.5)
         }.value
         log.info("SSDP found \(announced.count) Samsung device(s)")
 
         var found = await frameTVs(among: announced, timeout: 3)
-        if found.isEmpty {
+        if found.tvs.isEmpty {
             let subnet = localSubnetHosts()
             log.info("Sweeping \(subnet.count) local addresses")
-            found = await frameTVs(among: subnet, timeout: 1.5)
+            let swept = await frameTVs(among: subnet, timeout: 1.5)
+            found.tvs = swept.tvs
+            found.localNetworkDenied = found.localNetworkDenied || swept.localNetworkDenied
         }
-        return found.sorted { $0.host.localizedStandardCompare($1.host) == .orderedAscending }
+        if found.localNetworkDenied && found.tvs.isEmpty {
+            log.error("Local network access is denied")
+        }
+        found.tvs.sort { $0.host.localizedStandardCompare($1.host) == .orderedAscending }
+        return found
     }
 
     /// Keeps the hosts that answer as a Samsung TV with Art Mode support.
-    private static func frameTVs(among hosts: Set<String>, timeout: TimeInterval) async -> [DiscoveredTV] {
-        await withTaskGroup(of: DiscoveredTV?.self) { group in
+    private static func frameTVs(among hosts: Set<String>, timeout: TimeInterval) async -> Result {
+        enum Probe { case frameTV(DiscoveredTV), denied, nothing }
+        return await withTaskGroup(of: Probe.self) { group in
             for host in hosts {
                 group.addTask {
-                    guard let info = try? await TVDeviceInfo.fetch(host: host, timeout: timeout),
-                          info.isFrameTV
-                    else {
-                        return nil
+                    do {
+                        let info = try await TVDeviceInfo.fetch(host: host, timeout: timeout)
+                        guard info.isFrameTV else { return .nothing }
+                        return .frameTV(DiscoveredTV(host: host, name: info.displayName, model: info.device?.modelName))
+                    } catch FrameTVError.localNetworkDenied {
+                        return .denied
+                    } catch {
+                        return .nothing
                     }
-                    return DiscoveredTV(host: host, name: info.displayName, model: info.device?.modelName)
                 }
             }
-            var results: [DiscoveredTV] = []
-            for await tv in group {
-                if let tv { results.append(tv) }
+            var result = Result()
+            for await probe in group {
+                switch probe {
+                case .frameTV(let tv): result.tvs.append(tv)
+                case .denied: result.localNetworkDenied = true
+                case .nothing: break
+                }
             }
-            return results
+            return result
         }
     }
 

@@ -12,6 +12,8 @@ enum FrameTVError: LocalizedError {
     case badResponse(String)
     /// The photo was sent, but the TV never said it had saved it.
     case uploadNotConfirmed
+    /// macOS's Local Network privacy setting is blocking the app.
+    case localNetworkDenied
 
     var errorDescription: String? {
         switch self {
@@ -33,6 +35,8 @@ enum FrameTVError: LocalizedError {
             return "The TV rejected the “\(request)” request (Samsung error \(code))."
         case .badResponse(let what):
             return "Unexpected response from the TV (\(what))."
+        case .localNetworkDenied:
+            return "macOS is blocking Frame Uploader from your local network, so it can't reach the TV. Turn on Frame Uploader in System Settings › Privacy & Security › Local Network, then try again."
         case .uploadNotConfirmed:
             return "The photo was sent, but the TV never confirmed it saved it. The TV may have gone to sleep or been busy. Try uploading it again."
         }
@@ -57,9 +61,27 @@ enum FrameTVError: LocalizedError {
     /// Errors that mean the connection itself is unusable, so the rest of a batch should stop.
     var isConnectionFatal: Bool {
         switch self {
-        case .invalidHost, .notConnected, .unauthorized, .connectionLost: return true
+        case .invalidHost, .notConnected, .unauthorized, .connectionLost, .localNetworkDenied: return true
         case .timeout, .tvError, .badResponse, .uploadNotConfirmed: return false
         }
+    }
+}
+
+/// macOS 15 and later ask before an app may talk to devices on the local network. When access is
+/// off, requests fail with a misleading "The Internet connection appears to be offline".
+enum LocalNetworkAccess {
+    static let settingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork")!
+
+    static func isDenied(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        // The blocked network path is only described in the error's user info ("Local network prohibited").
+        if String(describing: nsError.userInfo).localizedCaseInsensitiveContains("local network prohibited") {
+            return true
+        }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? Error {
+            return isDenied(underlying)
+        }
+        return false
     }
 }
 
@@ -448,7 +470,9 @@ actor FrameArtClient {
     private func connectionClosed(_ error: Error) {
         guard socket != nil else { return }
         socket = nil
-        failAllWaiters(FrameTVError.connectionLost(error.localizedDescription))
+        failAllWaiters(LocalNetworkAccess.isDenied(error)
+            ? FrameTVError.localNetworkDenied
+            : FrameTVError.connectionLost(error.localizedDescription))
     }
 
     // MARK: - Waiting for replies

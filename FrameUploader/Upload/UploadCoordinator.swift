@@ -100,13 +100,21 @@ final class UploadCoordinator: ObservableObject {
     }
 
     func addAlbums(_ albumIDs: [String]) {
-        let newItems = albumIDs.flatMap { albumID -> [PhotoItem] in
-            let title = PhotoLibrary.albumTitle(albumID)
-            return PhotoLibrary.assets(inAlbum: albumID).map {
-                PhotoItem(origin: .library($0.id), name: $0.name, group: title)
-            }
+        guard !albumIDs.isEmpty else { return }
+        isScanning = true
+        Task {
+            // Reading file names from Photos is slow for big albums; keep it off the main thread.
+            let newItems = await Task.detached(priority: .userInitiated) {
+                albumIDs.flatMap { albumID -> [PhotoItem] in
+                    let title = PhotoLibrary.albumTitle(albumID)
+                    return PhotoLibrary.assets(inAlbum: albumID).map {
+                        PhotoItem(origin: .library($0.id), name: $0.name, group: title)
+                    }
+                }
+            }.value
+            append(newItems)
+            isScanning = false
         }
-        append(newItems)
     }
 
     private func append(_ newItems: [PhotoItem]) {
@@ -203,7 +211,9 @@ final class UploadCoordinator: ObservableObject {
             return (try await FrameArtClient.connected(to: host), host)
         } catch let error as FrameTVError where error.isUnreachable {
             statusText = "The TV didn't answer at \(host). Looking for it on the network…"
-            let found = await TVDiscovery.findFrameTVs()
+            let search = await TVDiscovery.findFrameTVs()
+            if search.localNetworkDenied { throw FrameTVError.localNetworkDenied }
+            let found = search.tvs
             guard found.count == 1, let tv = found.first, tv.host != host else { throw error }
 
             log.info("TV moved from \(host, privacy: .public) to \(tv.host, privacy: .public)")

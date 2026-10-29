@@ -54,16 +54,32 @@ If the TV later gets a new IP address from your router, the app finds it again o
 
 The mat style, mat color and slideshow options are under **Settings › Art Mode**. The upload history is under **Settings › Uploads**.
 
+## Local network access
+
+macOS 15 and later ask before an app may talk to devices on your home network. If Frame Uploader can't reach the TV, the app now says so. In Xcode's log it shows up as `Local network prohibited`, often next to a misleading "The Internet connection appears to be offline".
+
+1. Open **System Settings › Privacy & Security › Local Network** and turn on **Frame Uploader**.
+2. Quit and reopen the app.
+
+If the switch is already on, or the app isn't listed, macOS may be confused by rebuilt copies of the app. By default the project is signed "to run locally", which gives every build a slightly different identity. Signing with your free Apple ID makes the identity stable:
+
+1. In Xcode, select the **FrameUploader** project, then the **FrameUploader** target, then **Signing & Capabilities**.
+2. Turn on **Automatically manage signing**, and choose your **Personal Team** (add your Apple ID under Xcode › Settings › Accounts if it isn't listed).
+3. Build and run again. Allow the local network prompt when it appears.
+
+As a last resort, turning the Local Network switch off and on, or restarting the Mac, clears a stuck permission.
+
 ## Troubleshooting
 
 | Problem | Try this |
 | --- | --- |
+| Xcode's log is full of messages | Most are harmless macOS noise: `linkd.autoShortcut`, `Accessibility: Not vending elements`, `ViewBridge`, `CMPhotoDecompressionContainer`, `fopen failed`, `com.apple.accounts`, and `tcp_input … [R]`, which is the TV closing a finished transfer. Lines worth reporting mention `Local network prohibited` or come from `FrameUploader` itself. |
 | "No TV answered" | Make sure the TV is on or in Art Mode (not fully off), and that the Mac is on the same Wi-Fi/network. Check the IP address. |
 | The TV refused the connection | Click **Forget Pairing**, then **Connect & Pair**, and choose **Allow** on the TV. On the TV you can also check **Settings › General › External Device Manager › Device Connection Manager**. |
 | The mat isn't accepted | Some mat/color combinations aren't available on every model. The app uploads without a mat and says so. |
 | Some photos didn't upload | Each one is marked with an orange warning and the reason under its name, and the end-of-upload summary lists them. Click **Retry Failed** to send just those (earlier uploads are left alone). If the connection drops mid-batch, the app reconnects on its own, up to five times. |
 | Uploads are slow | Open the **Console** app, search for `FrameUploader`, and upload a few photos. Each one logs how long preparing, the transfer, and the TV's own processing took. The summary at the end shows the average time per photo. |
-| The local network prompt was denied | **System Settings › Privacy & Security › Local Network**, then turn on Frame Uploader. |
+| "macOS is blocking access to your local network" | See **Local network access** above. |
 | Photos access was denied | **System Settings › Privacy & Security › Photos**, then turn on Frame Uploader. |
 
 Because the app is signed locally, macOS may ask for Photos or local network permission again after you rebuild it in Xcode.

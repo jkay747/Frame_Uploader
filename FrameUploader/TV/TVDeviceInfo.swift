@@ -39,6 +39,7 @@ struct TVDeviceInfo: Decodable {
         do {
             (data, _) = try await URLSession.shared.data(for: request)
         } catch {
+            if LocalNetworkAccess.isDenied(error) { throw FrameTVError.localNetworkDenied }
             throw FrameTVError.connectionLost("no TV answered at \(host): \(error.localizedDescription)")
         }
         return try JSONDecoder().decode(TVDeviceInfo.self, from: data)
