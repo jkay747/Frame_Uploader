@@ -18,6 +18,7 @@ struct SettingsView: View {
 private struct TVSettingsView: View {
     @AppStorage(SettingsKey.tvHost) private var tvHost = ""
     @State private var testState: TestState = .idle
+    @State private var showingFinder = false
 
     private enum TestState {
         case idle
@@ -29,9 +30,12 @@ private struct TVSettingsView: View {
     var body: some View {
         Form {
             Section {
-                TextField("TV IP address", text: $tvHost, prompt: Text("e.g. 192.168.1.50"))
-                    .onSubmit { tvHost = AppSettings.normalizedHost(tvHost) }
-                Text("On the TV: Settings › All Settings › General & Privacy (or Connection) › Network › Network Status › IP Settings. Giving the TV a fixed address in your router keeps this from changing.")
+                HStack {
+                    TextField("TV IP address", text: $tvHost, prompt: Text("e.g. 192.168.1.50"))
+                        .onSubmit { tvHost = AppSettings.normalizedHost(tvHost) }
+                    Button("Find Automatically…") { showingFinder = true }
+                }
+                Text("To find the IP address yourself:\n\n" + TVHelp.findIPAddress)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -57,6 +61,22 @@ private struct TVSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .sheet(isPresented: $showingFinder) {
+            VStack(alignment: .leading, spacing: 16) {
+                TVFinderView { host in
+                    tvHost = host
+                    testState = .idle
+                    showingFinder = false
+                }
+                HStack {
+                    Spacer()
+                    Button("Cancel") { showingFinder = false }
+                        .keyboardShortcut(.cancelAction)
+                }
+            }
+            .padding(24)
+            .frame(width: 500)
+        }
     }
 
     private var isTesting: Bool {

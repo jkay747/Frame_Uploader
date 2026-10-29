@@ -9,6 +9,7 @@ struct ContentView: View {
     @AppStorage(SettingsKey.replacePrevious) private var replacePrevious = AppSettings.defaultReplacePrevious
     @State private var showingAlbumPicker = false
     @State private var isDropTargeted = false
+    @State private var showingTVSetup = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -61,6 +62,13 @@ struct ContentView: View {
                 .help("TV, mat and slideshow settings")
             }
         }
+        .sheet(isPresented: $showingTVSetup) {
+            TVSetupSheet()
+        }
+        .task {
+            // First launch: look for the TV before asking the user for anything.
+            if tvHost.isEmpty { showingTVSetup = true }
+        }
         .sheet(isPresented: $showingAlbumPicker) {
             AlbumPickerView { albumIDs in
                 coordinator.addAlbums(albumIDs)
@@ -106,13 +114,13 @@ struct ContentView: View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 6) {
                 if tvHost.isEmpty {
-                    HStack(spacing: 4) {
+                    HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.circle")
-                        Text("Add your TV's IP address in")
-                        SettingsLink { Text("Settings") }
+                            .foregroundStyle(.orange)
+                        Text("No TV set up yet.")
+                        Button("Find My TV…") { showingTVSetup = true }
                             .buttonStyle(.link)
                     }
-                    .foregroundStyle(.orange)
                 } else {
                     Text(coordinator.statusText.isEmpty ? "TV: \(tvHost)" : coordinator.statusText)
                         .lineLimit(1)

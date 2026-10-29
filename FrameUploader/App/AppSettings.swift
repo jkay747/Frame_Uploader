@@ -162,4 +162,21 @@ enum TokenStore {
     static func remove(for host: String) {
         UserDefaults.standard.removeObject(forKey: key(host))
     }
+
+    /// Carries the pairing over when the TV turns up at a new address.
+    static func move(from oldHost: String, to newHost: String) {
+        guard let token = token(for: oldHost) else { return }
+        save(token, for: newHost)
+        remove(for: oldHost)
+    }
+}
+
+enum TVHelp {
+    static let findIPAddress = """
+        Press the Home button on your Samsung remote.
+
+        1. Go to Settings.
+        2. Select General (or Connection / System depending on your Tizen year).
+        3. Choose Network or Device Name.
+        """
 }

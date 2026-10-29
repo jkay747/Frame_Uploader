@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import os
 
 enum FrameTVError: LocalizedError {
     case invalidHost(String)
@@ -26,6 +27,14 @@ enum FrameTVError: LocalizedError {
             return "The TV rejected the “\(request)” request (error \(code))."
         case .badResponse(let what):
             return "Unexpected response from the TV (\(what))."
+        }
+    }
+
+    /// The TV didn't answer at all, as opposed to answering with a refusal.
+    var isUnreachable: Bool {
+        switch self {
+        case .connectionLost, .timeout: return true
+        default: return false
         }
     }
 
@@ -82,6 +91,7 @@ struct TVMessage: @unchecked Sendable {
 /// that the TV opens for each upload.
 actor FrameArtClient {
     static let myPhotosCategory = "MY-C0002"
+    private static let log = Logger(subsystem: "com.kay2ventures.FrameUploader", category: "tv")
 
     let host: String
     private let clientName = "Frame Uploader"
@@ -183,6 +193,8 @@ actor FrameArtClient {
 
     /// Uploads a JPEG and returns the TV's content ID for it.
     func upload(jpeg: Data, matteID: String) async throws -> String {
+        let clock = ContinuousClock()
+        let started = clock.now
         let uploadID = UUID().uuidString.lowercased()
         let ready = try await request(
             "send_image",
@@ -202,6 +214,7 @@ actor FrameArtClient {
             waitFor: "ready_to_use",
             timeout: .seconds(30)
         )
+        let readyAt = clock.now
 
         let info = try Self.decodeObject(ready["conn_info"], what: "upload connection info")
         guard let ip = info["ip"] as? String,
@@ -245,19 +258,25 @@ actor FrameArtClient {
             resolve(added, with: .failure(error))
             throw error
         }
-        defer { connection.cancel() }
-
         do {
             try await D2DSocket.send(packet, over: connection)
         } catch {
+            connection.cancel()
             resolve(added, with: .failure(error))
             throw error
         }
+        // Close right away, as the reference client does. The TV may not finish the transfer until the
+        // socket closes, so holding it open until "image_added" could stall each upload.
+        connection.cancel()
+        let sentAt = clock.now
 
         let reply = try await wait(for: added, timeout: .seconds(120), label: "TV saving the photo")
         guard let contentID = reply.d2d?["content_id"] as? String else {
             throw FrameTVError.badResponse("no content ID for the uploaded photo")
         }
+        let kilobytes = jpeg.count / 1024
+        let timing = "TV ready after \(readyAt - started), transfer \(sentAt - readyAt), TV saved after \(clock.now - sentAt)"
+        Self.log.info("Uploaded \(kilobytes) KB. \(timing, privacy: .public)")
         return contentID
     }
 

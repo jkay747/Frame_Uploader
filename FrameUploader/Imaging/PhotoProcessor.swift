@@ -54,21 +54,39 @@ final class PhotoProcessor: @unchecked Sendable {
 
     // MARK: - Entry points
 
-    /// Full-quality JPEG ready to upload.
+    /// JPEG quality for uploads. At 3840×2160 this is visually lossless at TV viewing distance.
+    static let jpegQuality = 0.85
+    /// Files above this get re-encoded at lower quality: smaller files transfer and process faster on the TV.
+    static let jpegByteBudget = 3_000_000
+    /// Face/subject detection doesn't need more detail than this.
+    static let detectionPixelSize = 1024
+
+    /// A 3840×2160 JPEG, sized for a 4K TV, ready to upload.
     func makeTVImage(from data: Data) throws -> (jpeg: Data, mode: FitMode) {
-        let image = try ImageLoader.image(from: data, maxPixelSize: nil)
-        let (rendered, mode) = try render(image, outputSize: Self.tvSize)
-        return (try jpegData(rendered, quality: 0.92), mode)
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            throw PhotoProcessingError.unreadableImage
+        }
+        // Decode straight to the resolution the 4K output needs. A 48 MP photo decoded at full size is
+        // ~200 MB of pixels and was the slowest step; downsampling while decoding is many times faster.
+        let decodeSize = ImageLoader.pixelSizeNeeded(for: source, output: Self.tvSize)
+        let image = try ImageLoader.image(from: source, maxPixelSize: decodeSize)
+        var detection = image
+        if max(image.width, image.height) > Self.detectionPixelSize {
+            detection = try ImageLoader.image(from: source, maxPixelSize: Self.detectionPixelSize)
+        }
+        let (rendered, mode) = try render(image, detectionImage: detection, outputSize: Self.tvSize)
+        return (try budgetedJPEG(rendered), mode)
     }
 
     /// Small version of exactly what the TV will show.
     func makePreview(from image: CGImage) throws -> (image: CGImage, mode: FitMode) {
-        try render(image, outputSize: Self.previewSize)
+        try render(image, detectionImage: image, outputSize: Self.previewSize)
     }
 
     // MARK: - Rendering
 
-    func render(_ image: CGImage, outputSize: CGSize) throws -> (CGImage, FitMode) {
+    /// `detectionImage` is a (usually smaller) copy of `image` used to find faces and subjects.
+    func render(_ image: CGImage, detectionImage: CGImage, outputSize: CGSize) throws -> (CGImage, FitMode) {
         let isLandscape = image.width > image.height
         guard let context = CGContext(
             data: nil,
@@ -85,7 +103,7 @@ final class PhotoProcessor: @unchecked Sendable {
         let canvas = CGRect(origin: .zero, size: outputSize)
 
         if isLandscape {
-            try drawSmartCrop(image, in: context, canvas: canvas)
+            try drawSmartCrop(image, detectionImage: detectionImage, in: context, canvas: canvas)
         } else {
             try drawBlurredFill(image, in: context, canvas: canvas)
         }
@@ -94,8 +112,9 @@ final class PhotoProcessor: @unchecked Sendable {
         return (result, isLandscape ? .smartCrop : .blurredBackground)
     }
 
-    private func drawSmartCrop(_ image: CGImage, in context: CGContext, canvas: CGRect) throws {
-        let focus = SubjectDetector.focusRegion(in: image)
+    private func drawSmartCrop(_ image: CGImage, detectionImage: CGImage, in context: CGContext, canvas: CGRect) throws {
+        // Focus is normalized, so it carries over from the detection copy to the full image.
+        let focus = SubjectDetector.focusRegion(in: detectionImage)
         let crop = CropPlanner.cropRect(
             imageSize: CGSize(width: image.width, height: image.height),
             aspect: canvas.width / canvas.height,
@@ -167,6 +186,15 @@ final class PhotoProcessor: @unchecked Sendable {
         return rendered
     }
 
+    /// Encodes at `jpegQuality`, stepping down only when a very detailed photo would exceed the budget.
+    private func budgetedJPEG(_ image: CGImage) throws -> Data {
+        var data = try jpegData(image, quality: Self.jpegQuality)
+        for quality in [0.78, 0.7] where data.count > Self.jpegByteBudget {
+            data = try jpegData(image, quality: quality)
+        }
+        return data
+    }
+
     private func jpegData(_ image: CGImage, quality: Double) throws -> Data {
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else {
@@ -194,7 +222,29 @@ enum ImageLoader {
         return try image(from: source, maxPixelSize: maxPixelSize)
     }
 
-    private static func image(from source: CGImageSource, maxPixelSize: Int?) throws -> CGImage {
+    /// The longest side to decode so the photo still fills `output` at full sharpness, never above the original.
+    static func pixelSizeNeeded(for source: CGImageSource, output: CGSize) -> Int? {
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let pixelWidth = properties[kCGImagePropertyPixelWidth] as? Int,
+              let pixelHeight = properties[kCGImagePropertyPixelHeight] as? Int,
+              pixelWidth > 0, pixelHeight > 0
+        else {
+            return nil
+        }
+        var width = CGFloat(pixelWidth)
+        var height = CGFloat(pixelHeight)
+        // EXIF orientations 5–8 are rotated 90°, so width and height swap once upright.
+        if let orientation = properties[kCGImagePropertyOrientation] as? Int, (5...8).contains(orientation) {
+            swap(&width, &height)
+        }
+        // Landscape photos are cropped to fill the screen; portrait and square ones are fitted inside it.
+        let scale = width > height
+            ? max(output.width / width, output.height / height)
+            : min(output.width / width, output.height / height)
+        return Int((max(width, height) * min(scale, 1)).rounded(.up))
+    }
+
+    static func image(from source: CGImageSource, maxPixelSize: Int?) throws -> CGImage {
         let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
         let width = properties?[kCGImagePropertyPixelWidth] as? Int ?? 0
         let height = properties?[kCGImagePropertyPixelHeight] as? Int ?? 0

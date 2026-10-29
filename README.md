@@ -15,6 +15,7 @@ The window shows a preview of exactly what the TV will display before you upload
 - **Skip duplicates:** photos already on the TV are recognized by their content, even if renamed or moved, and aren't uploaded again.
 - **Replace previous upload:** after uploading, removes photos *this app* uploaded earlier that aren't in the new batch. Photos you added to the TV any other way are never touched.
 - **Mats:** pick any of the TV's mat styles and colors, or none for edge-to-edge.
+- **Sized for 4K:** each photo is decoded only at the resolution the 3840×2160 output needs and saved as an sRGB JPEG, usually 1–3 MB. The next photo is prepared while the current one uploads.
 - **Slideshow:** optionally starts the Art Mode slideshow (shuffled or in order) when the upload finishes.
 
 ## Requirements
@@ -32,10 +33,18 @@ No Apple developer account is needed. The app is signed to run on your own Mac. 
 
 ## First-time setup
 
-1. Find your TV's IP address. On the TV, go to **Settings › All Settings › General & Privacy › Network › Network Status › IP Settings**. Menu names vary a little by model year. Reserving that address in your router stops it from changing later.
-2. In the app, open **Settings** (⌘,) › **TV**, enter the address, and click **Connect & Pair**.
-3. The TV asks whether to allow "Frame Uploader". Choose **Allow** with the remote. The app remembers the pairing.
-4. macOS may ask to let the app find devices on your local network. Click **Allow**.
+1. Turn the TV on (Art Mode is fine) and launch the app. It searches your network for Frame TVs automatically. macOS will ask to let the app find devices on your local network; click **Allow**.
+2. Choose your TV from the list. If none is found, the app shows how to look up the TV's IP address, and you can type it in:
+
+   > Press the Home button on your Samsung remote.
+   >
+   > 1. Go to Settings.
+   > 2. Select General (or Connection / System depending on your Tizen year).
+   > 3. Choose Network or Device Name.
+
+3. On your first upload, or when you click **Settings › TV › Connect & Pair**, the TV asks whether to allow "Frame Uploader". Choose **Allow** with the remote. The app remembers the pairing.
+
+If the TV later gets a new IP address from your router, the app finds it again on its own and keeps the pairing and upload history.
 
 ## Using it
 
@@ -52,6 +61,7 @@ The mat style, mat color and slideshow options are under **Settings › Art Mode
 | "No TV answered" | Make sure the TV is on or in Art Mode (not fully off), and that the Mac is on the same Wi-Fi/network. Check the IP address. |
 | The TV refused the connection | Click **Forget Pairing**, then **Connect & Pair**, and choose **Allow** on the TV. On the TV you can also check **Settings › General › External Device Manager › Device Connection Manager**. |
 | The mat isn't accepted | Some mat/color combinations aren't available on every model. The app uploads without a mat and says so. |
+| Uploads are slow | Open the **Console** app, search for `FrameUploader`, and upload a few photos. Each one logs how long preparing, the transfer, and the TV's own processing took. The summary at the end shows the average time per photo. |
 | The local network prompt was denied | **System Settings › Privacy & Security › Local Network**, then turn on Frame Uploader. |
 | Photos access was denied | **System Settings › Privacy & Security › Photos**, then turn on Frame Uploader. |
 

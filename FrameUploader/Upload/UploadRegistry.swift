@@ -67,6 +67,13 @@ final class UploadRegistry: ObservableObject {
         }
     }
 
+    /// Keeps the history when the TV turns up at a new address.
+    func moveHost(from oldHost: String, to newHost: String) {
+        guard let records = recordsByHost.removeValue(forKey: oldHost) else { return }
+        recordsByHost[newHost, default: [:]].merge(records) { current, _ in current }
+        save()
+    }
+
     func forget(host: String) {
         recordsByHost[host] = nil
         save()

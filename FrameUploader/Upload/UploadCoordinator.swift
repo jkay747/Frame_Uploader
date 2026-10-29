@@ -1,4 +1,5 @@
 import Foundation
+import os
 import SwiftUI
 
 struct UploadSummary: Identifiable {
@@ -11,6 +12,8 @@ struct UploadSummary: Identifiable {
     var notes: [String] = []
     var stopReason: String?
     var cancelled = false
+    var bytesSent = 0
+    var elapsed: Duration = .zero
 
     var title: String {
         if cancelled { return "Upload cancelled" }
@@ -25,6 +28,12 @@ struct UploadSummary: Identifiable {
         if uploaded > 0 { lines.append("Uploaded \(uploaded) photo\(uploaded == 1 ? "" : "s").") }
         if alreadyOnTV > 0 { lines.append("\(alreadyOnTV) already on the TV, so skipped.") }
         if failed > 0 { lines.append("\(failed) couldn't be uploaded. Hover over the warning icon on each one for details.") }
+        if uploaded > 0 {
+            let megabytes = Double(bytesSent) / 1_000_000
+            let seconds = Double(elapsed.components.seconds)
+            let perPhoto = seconds / Double(uploaded + alreadyOnTV)
+            lines.append(String(format: "Sent %.1f MB in %.0f s (about %.1f s per photo).", megabytes, seconds, perPhoto))
+        }
         if removed > 0 { lines.append("Removed \(removed) photo\(removed == 1 ? "" : "s") from your previous upload.") }
         if let slideshowMessage { lines.append(slideshowMessage) }
         lines += notes
@@ -43,6 +52,7 @@ final class UploadCoordinator: ObservableObject {
     @Published var summary: UploadSummary?
 
     let previews = PreviewLoader()
+    private let log = Logger(subsystem: "com.kay2ventures.FrameUploader", category: "upload")
     private let registry = UploadRegistry.shared
     private var knownOrigins: Set<PhotoOrigin> = []
     private var uploadTask: Task<Void, Never>?
@@ -126,21 +136,71 @@ final class UploadCoordinator: ObservableObject {
         statusText = "Stopping…"
     }
 
+    /// A photo made ready for the TV, or found to be on it already.
+    private enum PreparedPhoto {
+        case alreadyOnTV(UploadRecord)
+        case ready(fingerprint: String, jpeg: Data)
+    }
+
+    private func prepare(_ item: PhotoItem, host: String, skipDuplicates: Bool, onTV: Set<String>) async throws -> PreparedPhoto {
+        let clock = ContinuousClock()
+        let started = clock.now
+        let data = try await PhotoLoader.data(for: item.origin)
+        let fingerprint = await Task.detached(priority: .userInitiated) {
+            PhotoLoader.fingerprint(of: data)
+        }.value
+
+        if skipDuplicates, let existing = registry.record(for: host, fingerprint: fingerprint), onTV.contains(existing.contentID) {
+            return .alreadyOnTV(existing)
+        }
+
+        let jpeg = try await Task.detached(priority: .userInitiated) {
+            try PhotoProcessor.shared.makeTVImage(from: data).jpeg
+        }.value
+        let original = data.count / 1024
+        let optimized = jpeg.count / 1024
+        let elapsed = clock.now - started
+        log.info("Prepared \(item.name, privacy: .public): \(original) KB → \(optimized) KB in \(elapsed.description, privacy: .public)")
+        return .ready(fingerprint: fingerprint, jpeg: jpeg)
+    }
+
+    /// Connects to the saved address. If the TV doesn't answer there (routers often hand out a new
+    /// address), looks for it on the network and switches to it, keeping the pairing and history.
+    private func connectToTV(host: String) async throws -> (client: FrameArtClient, host: String) {
+        do {
+            return (try await FrameArtClient.connected(to: host), host)
+        } catch let error as FrameTVError where error.isUnreachable {
+            statusText = "The TV didn't answer at \(host). Looking for it on the network…"
+            let found = await TVDiscovery.findFrameTVs()
+            guard found.count == 1, let tv = found.first, tv.host != host else { throw error }
+
+            log.info("TV moved from \(host, privacy: .public) to \(tv.host, privacy: .public)")
+            TokenStore.move(from: host, to: tv.host)
+            registry.moveHost(from: host, to: tv.host)
+            UserDefaults.standard.set(tv.host, forKey: SettingsKey.tvHost)
+            statusText = "Found \(tv.name) at \(tv.host). Connecting…"
+            return (try await FrameArtClient.connected(to: tv.host), tv.host)
+        }
+    }
+
     private func runUpload(options: UploadOptions) async {
         isWorking = true
         progress = 0
         defer { isWorking = false }
 
-        let host = options.host
+        let clock = ContinuousClock()
+        let started = clock.now
         let targets = items.filter(\.isIncluded)
         for item in targets { setStatus(item.id, .waiting) }
 
         var summary = UploadSummary()
         var client: FrameArtClient?
+        var nextPhoto: Task<PreparedPhoto, Error>?
+        var bytesSent = 0
 
         do {
             statusText = "Connecting to your TV… The first time, select Allow on the TV with your remote."
-            let connected = try await FrameArtClient.connected(to: host)
+            let (connected, host) = try await connectToTV(host: options.host)
             client = connected
 
             statusText = "Checking what's already on the TV…"
@@ -151,19 +211,42 @@ final class UploadCoordinator: ObservableObject {
             var batchIDs: [String] = []
             var matteID = options.matteID
 
+            func startPreparing(_ index: Int) -> Task<PreparedPhoto, Error>? {
+                guard index < targets.count else { return nil }
+                let item = targets[index]
+                let snapshot = onTV
+                setStatus(item.id, .preparing)
+                return Task {
+                    try await self.prepare(item, host: host, skipDuplicates: options.skipDuplicates, onTV: snapshot)
+                }
+            }
+
+            nextPhoto = startPreparing(0)
             for (index, item) in targets.enumerated() {
                 try Task.checkCancellation()
                 progress = Double(index) / Double(targets.count)
                 statusText = "Photo \(index + 1) of \(targets.count): \(item.name)"
 
-                do {
-                    setStatus(item.id, .preparing)
-                    let data = try await PhotoLoader.data(for: item.origin)
-                    let fingerprint = PhotoLoader.fingerprint(of: data)
+                guard let current = nextPhoto else { break }
+                // Resize the next photo while this one is on its way to the TV.
+                nextPhoto = startPreparing(index + 1)
 
-                    if options.skipDuplicates,
+                do {
+                    var prepared = try await withTaskCancellationHandler {
+                        try await current.value
+                    } onCancel: {
+                        current.cancel()
+                    }
+
+                    // The same photo twice in one batch is only recognizable once the first has uploaded.
+                    if case .ready(let fingerprint, _) = prepared, options.skipDuplicates,
                        let existing = registry.record(for: host, fingerprint: fingerprint),
                        onTV.contains(existing.contentID) {
+                        prepared = .alreadyOnTV(existing)
+                    }
+
+                    switch prepared {
+                    case .alreadyOnTV(let existing):
                         if existing.matteID != matteID {
                             try await connected.changeMatte(contentID: existing.contentID, matteID: matteID)
                             registry.updateMatte(contentID: existing.contentID, matteID: matteID, for: host)
@@ -171,35 +254,32 @@ final class UploadCoordinator: ObservableObject {
                         batchIDs.append(existing.contentID)
                         summary.alreadyOnTV += 1
                         setStatus(item.id, .alreadyOnTV)
-                        continue
+
+                    case .ready(let fingerprint, let jpeg):
+                        setStatus(item.id, .uploading)
+                        let contentID: String
+                        do {
+                            contentID = try await connected.upload(jpeg: jpeg, matteID: matteID)
+                        } catch FrameTVError.tvError(let request, let code) where matteID != "none" {
+                            // The chosen mat isn't supported for this photo on this TV; fall back to no mat.
+                            summary.notes.append("The TV didn't accept the mat “\(matteID)” (error \(code) on \(request)), so photos were uploaded without a mat.")
+                            matteID = "none"
+                            contentID = try await connected.upload(jpeg: jpeg, matteID: matteID)
+                        }
+                        bytesSent += jpeg.count
+
+                        registry.add(UploadRecord(
+                            contentID: contentID,
+                            fingerprint: fingerprint,
+                            matteID: matteID,
+                            sourceName: item.name,
+                            uploadedAt: Date()
+                        ), for: host)
+                        onTV.insert(contentID)
+                        batchIDs.append(contentID)
+                        summary.uploaded += 1
+                        setStatus(item.id, .uploaded)
                     }
-
-                    let jpeg = try await Task.detached(priority: .userInitiated) {
-                        try PhotoProcessor.shared.makeTVImage(from: data).jpeg
-                    }.value
-
-                    setStatus(item.id, .uploading)
-                    let contentID: String
-                    do {
-                        contentID = try await connected.upload(jpeg: jpeg, matteID: matteID)
-                    } catch FrameTVError.tvError(let request, let code) where matteID != "none" {
-                        // The chosen mat isn't supported for this photo on this TV; fall back to no mat.
-                        summary.notes.append("The TV didn't accept the mat “\(matteID)” (error \(code) on \(request)), so photos were uploaded without a mat.")
-                        matteID = "none"
-                        contentID = try await connected.upload(jpeg: jpeg, matteID: matteID)
-                    }
-
-                    registry.add(UploadRecord(
-                        contentID: contentID,
-                        fingerprint: fingerprint,
-                        matteID: matteID,
-                        sourceName: item.name,
-                        uploadedAt: Date()
-                    ), for: host)
-                    onTV.insert(contentID)
-                    batchIDs.append(contentID)
-                    summary.uploaded += 1
-                    setStatus(item.id, .uploaded)
                 } catch let error as FrameTVError where error.isConnectionFatal {
                     setStatus(item.id, .failed(error.localizedDescription))
                     throw error
@@ -245,12 +325,17 @@ final class UploadCoordinator: ObservableObject {
             summary.stopReason = error.localizedDescription
         }
 
+        nextPhoto?.cancel()
         await client?.disconnect()
         for item in targets {
-            if let current = items.first(where: { $0.id == item.id }), current.status == .waiting || current.status == .preparing || current.status == .uploading {
+            if let current = items.first(where: { $0.id == item.id }),
+               current.status == .waiting || current.status == .preparing || current.status == .uploading {
                 setStatus(item.id, .pending)
             }
         }
+        summary.bytesSent = bytesSent
+        summary.elapsed = clock.now - started
+        log.info("Batch finished: \(summary.uploaded) uploaded, \(summary.alreadyOnTV) skipped, \(summary.failed) failed, \(bytesSent / 1024) KB in \(summary.elapsed.description, privacy: .public)")
         statusText = summary.title
         self.summary = summary
     }

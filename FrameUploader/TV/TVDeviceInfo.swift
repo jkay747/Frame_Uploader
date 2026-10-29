@@ -29,12 +29,12 @@ struct TVDeviceInfo: Decodable {
         device?.frameTVSupport?.lowercased() == "true"
     }
 
-    static func fetch(host: String) async throws -> TVDeviceInfo {
+    static func fetch(host: String, timeout: TimeInterval = 6) async throws -> TVDeviceInfo {
         guard let url = URL(string: "http://\(host):8001/api/v2/") else {
             throw FrameTVError.invalidHost(host)
         }
         var request = URLRequest(url: url)
-        request.timeoutInterval = 6
+        request.timeoutInterval = timeout
         let data: Data
         do {
             (data, _) = try await URLSession.shared.data(for: request)
