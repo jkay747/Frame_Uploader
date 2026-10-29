@@ -6,7 +6,6 @@ struct UploadSummary: Identifiable {
     let id = UUID()
     var uploaded = 0
     var alreadyOnTV = 0
-    var failed = 0
     var removed = 0
     var slideshowMessage: String?
     var notes: [String] = []
@@ -14,6 +13,11 @@ struct UploadSummary: Identifiable {
     var cancelled = false
     var bytesSent = 0
     var elapsed: Duration = .zero
+    var reconnects = 0
+    /// Each photo that didn't make it, with the reason.
+    var failures: [(name: String, reason: String)] = []
+
+    var failed: Int { failures.count }
 
     var title: String {
         if cancelled { return "Upload cancelled" }
@@ -27,7 +31,16 @@ struct UploadSummary: Identifiable {
         if let stopReason { lines.append(stopReason) }
         if uploaded > 0 { lines.append("Uploaded \(uploaded) photo\(uploaded == 1 ? "" : "s").") }
         if alreadyOnTV > 0 { lines.append("\(alreadyOnTV) already on the TV, so skipped.") }
-        if failed > 0 { lines.append("\(failed) couldn't be uploaded. Hover over the warning icon on each one for details.") }
+        if failed > 0 {
+            lines.append("\(failed) photo\(failed == 1 ? "" : "s") didn't upload:")
+            let shown = 8
+            for failure in failures.prefix(shown) {
+                lines.append("• \(failure.name): \(failure.reason)")
+            }
+            if failures.count > shown {
+                lines.append("• …and \(failures.count - shown) more. Each one is marked in the window with its reason.")
+            }
+        }
         if uploaded > 0 {
             let megabytes = Double(bytesSent) / 1_000_000
             let seconds = Double(elapsed.components.seconds)
@@ -36,6 +49,9 @@ struct UploadSummary: Identifiable {
         }
         if removed > 0 { lines.append("Removed \(removed) photo\(removed == 1 ? "" : "s") from your previous upload.") }
         if let slideshowMessage { lines.append(slideshowMessage) }
+        if reconnects > 0 {
+            lines.append("The connection to the TV dropped and was restored \(reconnects == 1 ? "once" : "\(reconnects) times").")
+        }
         lines += notes
         if lines.isEmpty { lines.append("Nothing was uploaded.") }
         return lines.joined(separator: "\n")
@@ -58,6 +74,7 @@ final class UploadCoordinator: ObservableObject {
     private var uploadTask: Task<Void, Never>?
 
     var includedCount: Int { items.filter(\.isIncluded).count }
+    var failedCount: Int { items.filter { $0.isIncluded && $0.status.failureReason != nil }.count }
 
     // MARK: - Adding and removing photos
 
@@ -65,16 +82,19 @@ final class UploadCoordinator: ObservableObject {
         guard !urls.isEmpty else { return }
         isScanning = true
         Task {
-            let files = await Task.detached(priority: .userInitiated) {
-                FolderScanner.imageFiles(in: urls)
+            let scan = await Task.detached(priority: .userInitiated) {
+                FolderScanner.scan(urls)
             }.value
-            let newItems = files.map { url in
+            let newItems = scan.files.map { url in
                 PhotoItem(origin: .file(url), name: url.lastPathComponent, group: url.deletingLastPathComponent().lastPathComponent)
             }
             append(newItems)
             isScanning = false
-            if files.isEmpty {
+            if scan.files.isEmpty {
                 statusText = "No photos found in what you added."
+            }
+            if let skipped = scan.skippedSummary {
+                statusText += " " + skipped
             }
         }
     }
@@ -124,9 +144,21 @@ final class UploadCoordinator: ObservableObject {
     // MARK: - Uploading
 
     func startUpload() {
-        guard uploadTask == nil, includedCount > 0 else { return }
+        start(targets: items.filter(\.isIncluded), options: .current())
+    }
+
+    /// Uploads only the photos that failed last time.
+    func retryFailed() {
+        var options = UploadOptions.current()
+        // A retry is a partial batch: "replace previous" would delete the photos that did upload.
+        options.replacePrevious = false
+        start(targets: items.filter { $0.isIncluded && $0.status.failureReason != nil }, options: options)
+    }
+
+    private func start(targets: [PhotoItem], options: UploadOptions) {
+        guard uploadTask == nil, !targets.isEmpty else { return }
         uploadTask = Task {
-            await runUpload(options: .current())
+            await runUpload(targets: targets, options: options)
             uploadTask = nil
         }
     }
@@ -183,14 +215,13 @@ final class UploadCoordinator: ObservableObject {
         }
     }
 
-    private func runUpload(options: UploadOptions) async {
+    private func runUpload(targets: [PhotoItem], options: UploadOptions) async {
         isWorking = true
         progress = 0
         defer { isWorking = false }
 
         let clock = ContinuousClock()
         let started = clock.now
-        let targets = items.filter(\.isIncluded)
         for item in targets { setStatus(item.id, .waiting) }
 
         var summary = UploadSummary()
@@ -200,7 +231,8 @@ final class UploadCoordinator: ObservableObject {
 
         do {
             statusText = "Connecting to your TV… The first time, select Allow on the TV with your remote."
-            let (connected, host) = try await connectToTV(host: options.host)
+            let (firstConnection, host) = try await connectToTV(host: options.host)
+            var connected = firstConnection
             client = connected
 
             statusText = "Checking what's already on the TV…"
@@ -210,6 +242,55 @@ final class UploadCoordinator: ObservableObject {
             // Everything in this batch, whether uploaded now or already there.
             var batchIDs: [String] = []
             var matteID = options.matteID
+            var reconnectsLeft = 5
+
+            /// Opens a fresh connection after the TV dropped the old one (it dozes off or restarts its art app).
+            func reconnect(after error: Error) async throws {
+                guard reconnectsLeft > 0 else { throw error }
+                reconnectsLeft -= 1
+                log.error("Reconnecting after: \(error.localizedDescription, privacy: .public)")
+                let previousStatus = statusText
+                statusText = "Lost the connection to the TV. Reconnecting…"
+                await connected.disconnect()
+                connected = try await FrameArtClient.connected(to: host)
+                client = connected
+                summary.reconnects += 1
+                statusText = previousStatus
+            }
+
+            /// Runs a TV command, reconnecting and trying once more if the connection dropped.
+            func withReconnect<T>(_ operation: (FrameArtClient) async throws -> T) async throws -> T {
+                do {
+                    return try await operation(connected)
+                } catch let error as FrameTVError where error.isConnectionDrop {
+                    try await reconnect(after: error)
+                    return try await operation(connected)
+                }
+            }
+
+            /// Uploads one photo and returns its content ID on the TV.
+            func send(_ jpeg: Data) async throws -> String {
+                do {
+                    return try await withReconnect { try await $0.upload(jpeg: jpeg, matteID: matteID) }
+                } catch FrameTVError.uploadNotConfirmed {
+                    // Start a fresh session so a late confirmation can't be credited to the next photo,
+                    // then check whether the TV saved the photo without saying so.
+                    try await reconnect(after: FrameTVError.uploadNotConfirmed)
+                    let newOnTV = Set(try await connected.contentIDs()).subtracting(onTV)
+                    if newOnTV.count == 1, let contentID = newOnTV.first {
+                        log.info("Upload confirmed late via the content list")
+                        return contentID
+                    }
+                    throw FrameTVError.uploadNotConfirmed
+                } catch FrameTVError.tvError("send_image", let code) where matteID != "none" {
+                    // Maybe the mat is the problem. If the photo also fails without one, report that error.
+                    let rejected = matteID
+                    let contentID = try await withReconnect { try await $0.upload(jpeg: jpeg, matteID: "none") }
+                    matteID = "none"
+                    summary.notes.append("The TV didn't accept the mat “\(Matte.displayName(rejected))” (Samsung error \(code)), so photos were uploaded without a mat.")
+                    return contentID
+                }
+            }
 
             func startPreparing(_ index: Int) -> Task<PreparedPhoto, Error>? {
                 guard index < targets.count else { return nil }
@@ -248,7 +329,8 @@ final class UploadCoordinator: ObservableObject {
                     switch prepared {
                     case .alreadyOnTV(let existing):
                         if existing.matteID != matteID {
-                            try await connected.changeMatte(contentID: existing.contentID, matteID: matteID)
+                            let mat = matteID
+                            try await withReconnect { try await $0.changeMatte(contentID: existing.contentID, matteID: mat) }
                             registry.updateMatte(contentID: existing.contentID, matteID: matteID, for: host)
                         }
                         batchIDs.append(existing.contentID)
@@ -257,15 +339,7 @@ final class UploadCoordinator: ObservableObject {
 
                     case .ready(let fingerprint, let jpeg):
                         setStatus(item.id, .uploading)
-                        let contentID: String
-                        do {
-                            contentID = try await connected.upload(jpeg: jpeg, matteID: matteID)
-                        } catch FrameTVError.tvError(let request, let code) where matteID != "none" {
-                            // The chosen mat isn't supported for this photo on this TV; fall back to no mat.
-                            summary.notes.append("The TV didn't accept the mat “\(matteID)” (error \(code) on \(request)), so photos were uploaded without a mat.")
-                            matteID = "none"
-                            contentID = try await connected.upload(jpeg: jpeg, matteID: matteID)
-                        }
+                        let contentID = try await send(jpeg)
                         bytesSent += jpeg.count
 
                         registry.add(UploadRecord(
@@ -281,12 +355,13 @@ final class UploadCoordinator: ObservableObject {
                         setStatus(item.id, .uploaded)
                     }
                 } catch let error as FrameTVError where error.isConnectionFatal {
-                    setStatus(item.id, .failed(error.localizedDescription))
+                    // Reconnecting already failed; the photos left are marked once the batch winds down.
                     throw error
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
-                    summary.failed += 1
+                    log.error("\(item.name, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+                    summary.failures.append((item.name, error.localizedDescription))
                     setStatus(item.id, .failed(error.localizedDescription))
                 }
             }
@@ -299,7 +374,7 @@ final class UploadCoordinator: ObservableObject {
                     .filter { !keep.contains($0) && onTV.contains($0) }
                 if !previous.isEmpty {
                     statusText = "Removing \(previous.count) photo\(previous.count == 1 ? "" : "s") from your previous upload…"
-                    try await connected.delete(contentIDs: previous)
+                    try await withReconnect { try await $0.delete(contentIDs: previous) }
                     registry.remove(contentIDs: previous, for: host)
                     summary.removed = previous.count
                 }
@@ -327,9 +402,17 @@ final class UploadCoordinator: ObservableObject {
 
         nextPhoto?.cancel()
         await client?.disconnect()
+        // Photos the batch never got to: say why instead of quietly resetting them.
         for item in targets {
-            if let current = items.first(where: { $0.id == item.id }),
-               current.status == .waiting || current.status == .preparing || current.status == .uploading {
+            guard let current = items.first(where: { $0.id == item.id }),
+                  [.waiting, .preparing, .uploading].contains(current.status)
+            else {
+                continue
+            }
+            if let stopReason = summary.stopReason {
+                summary.failures.append((item.name, "Not sent because the upload stopped."))
+                setStatus(item.id, .failed("Not sent because the upload stopped: \(stopReason)"))
+            } else {
                 setStatus(item.id, .pending)
             }
         }

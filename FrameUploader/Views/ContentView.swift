@@ -81,6 +81,9 @@ struct ContentView: View {
                 set: { if !$0 { coordinator.summary = nil } }
             )
         ) {
+            if (coordinator.summary?.failed ?? 0) > 0, coordinator.failedCount > 0 {
+                Button("Retry Failed") { coordinator.retryFailed() }
+            }
             Button("OK") {}
         } message: {
             Text(coordinator.summary?.message ?? "")
@@ -147,6 +150,11 @@ struct ContentView: View {
                 Button("Stop") { coordinator.cancelUpload() }
                     .controlSize(.large)
             } else {
+                if coordinator.failedCount > 0 {
+                    Button("Retry \(coordinator.failedCount) Failed") { coordinator.retryFailed() }
+                        .controlSize(.large)
+                        .help("Upload only the photos marked with a warning. Previous uploads are left in place.")
+                }
                 Button {
                     coordinator.startUpload()
                 } label: {
@@ -262,10 +270,20 @@ private struct PhotoCell: View {
                     Text(item.name)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Text(item.group)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    if let reason = item.status.failureReason {
+                        Text(reason)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .lineLimit(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .help(reason)
+                            .textSelection(.enabled)
+                    } else {
+                        Text(item.group)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
                 Spacer(minLength: 4)
                 if let preview {

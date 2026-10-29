@@ -61,6 +61,7 @@ The mat style, mat color and slideshow options are under **Settings › Art Mode
 | "No TV answered" | Make sure the TV is on or in Art Mode (not fully off), and that the Mac is on the same Wi-Fi/network. Check the IP address. |
 | The TV refused the connection | Click **Forget Pairing**, then **Connect & Pair**, and choose **Allow** on the TV. On the TV you can also check **Settings › General › External Device Manager › Device Connection Manager**. |
 | The mat isn't accepted | Some mat/color combinations aren't available on every model. The app uploads without a mat and says so. |
+| Some photos didn't upload | Each one is marked with an orange warning and the reason under its name, and the end-of-upload summary lists them. Click **Retry Failed** to send just those (earlier uploads are left alone). If the connection drops mid-batch, the app reconnects on its own, up to five times. |
 | Uploads are slow | Open the **Console** app, search for `FrameUploader`, and upload a few photos. Each one logs how long preparing, the transfer, and the TV's own processing took. The summary at the end shows the average time per photo. |
 | The local network prompt was denied | **System Settings › Privacy & Security › Local Network**, then turn on Frame Uploader. |
 | Photos access was denied | **System Settings › Privacy & Security › Photos**, then turn on Frame Uploader. |

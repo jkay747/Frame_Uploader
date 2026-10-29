@@ -3,7 +3,7 @@ import Network
 
 /// The raw TCP socket the TV opens for each image transfer ("device to device").
 enum D2DSocket {
-    private static let queue = DispatchQueue(label: "FrameUploader.D2DSocket")
+    fileprivate static let queue = DispatchQueue(label: "FrameUploader.D2DSocket")
 
     static func open(host: String, port: Int, secured: Bool) async throws -> NWConnection {
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(clamping: port)) else {
@@ -57,6 +57,26 @@ enum D2DSocket {
                     continuation.resume()
                 }
             })
+        }
+    }
+}
+
+extension D2DSocket {
+    /// Waits for the TV to close its end (it has read everything by then), then releases the
+    /// connection. Gives up after `timeout` so a TV that never closes can't leak sockets.
+    static func closeAfterPeerFinishes(_ connection: NWConnection, timeout: TimeInterval = 30) {
+        func drain() {
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { _, _, isComplete, error in
+                if isComplete || error != nil {
+                    connection.cancel()
+                } else {
+                    drain()
+                }
+            }
+        }
+        drain()
+        queue.asyncAfter(deadline: .now() + timeout) {
+            connection.cancel()
         }
     }
 }

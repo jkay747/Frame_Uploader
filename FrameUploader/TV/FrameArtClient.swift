@@ -10,6 +10,8 @@ enum FrameTVError: LocalizedError {
     case timeout(String)
     case tvError(request: String, code: String)
     case badResponse(String)
+    /// The photo was sent, but the TV never said it had saved it.
+    case uploadNotConfirmed
 
     var errorDescription: String? {
         switch self {
@@ -23,10 +25,16 @@ enum FrameTVError: LocalizedError {
             return "Lost the connection to the TV (\(reason)). Make sure the TV is on or in Art Mode."
         case .timeout(let what):
             return "The TV didn't respond in time (\(what))."
+        case .tvError("send_image", let code):
+            return "The TV refused this photo (Samsung error \(code)). Its photo storage may be full. Try deleting some photos from My Photos on the TV, then upload again."
+        case .tvError("change_matte", let code):
+            return "The TV couldn't apply the mat to this photo (Samsung error \(code))."
         case .tvError(let request, let code):
-            return "The TV rejected the “\(request)” request (error \(code))."
+            return "The TV rejected the “\(request)” request (Samsung error \(code))."
         case .badResponse(let what):
             return "Unexpected response from the TV (\(what))."
+        case .uploadNotConfirmed:
+            return "The photo was sent, but the TV never confirmed it saved it. The TV may have gone to sleep or been busy. Try uploading it again."
         }
     }
 
@@ -38,11 +46,19 @@ enum FrameTVError: LocalizedError {
         }
     }
 
+    /// The connection dropped, which a fresh connection can fix (unlike a refusal or a bad address).
+    var isConnectionDrop: Bool {
+        switch self {
+        case .notConnected, .connectionLost: return true
+        default: return false
+        }
+    }
+
     /// Errors that mean the connection itself is unusable, so the rest of a batch should stop.
     var isConnectionFatal: Bool {
         switch self {
         case .invalidHost, .notConnected, .unauthorized, .connectionLost: return true
-        case .timeout, .tvError, .badResponse: return false
+        case .timeout, .tvError, .badResponse, .uploadNotConfirmed: return false
         }
     }
 }
@@ -245,7 +261,10 @@ actor FrameArtClient {
         let added = register { message in
             guard let reply = message.d2d else { return false }
             let event = reply["event"] as? String
-            if event == "error", (reply["request_id"] as? String ?? reply["id"] as? String) == uploadID {
+            let replyID = reply["request_id"] as? String ?? reply["id"] as? String
+            // Some firmware reports transfer errors without an ID; only one upload runs at a time, so it's ours.
+            if event == "error", replyID == nil || replyID == uploadID {
+                Self.log.error("TV reported an upload error: \(String(describing: reply), privacy: .public)")
                 throw FrameTVError.tvError(request: "send_image", code: "\(reply["error_code"] ?? "unknown")")
             }
             return event == "image_added"
@@ -265,12 +284,17 @@ actor FrameArtClient {
             resolve(added, with: .failure(error))
             throw error
         }
-        // Close right away, as the reference client does. The TV may not finish the transfer until the
-        // socket closes, so holding it open until "image_added" could stall each upload.
-        connection.cancel()
+        // Our side is already closed (the send ended the stream). Let the TV finish reading before the
+        // socket is torn down; cancelling straight away could cut off the end of a large photo.
+        D2DSocket.closeAfterPeerFinishes(connection)
         let sentAt = clock.now
 
-        let reply = try await wait(for: added, timeout: .seconds(120), label: "TV saving the photo")
+        let reply: TVMessage
+        do {
+            reply = try await wait(for: added, timeout: .seconds(120), label: "TV saving the photo")
+        } catch FrameTVError.timeout {
+            throw FrameTVError.uploadNotConfirmed
+        }
         guard let contentID = reply.d2d?["content_id"] as? String else {
             throw FrameTVError.badResponse("no content ID for the uploaded photo")
         }
